@@ -5,19 +5,15 @@ import librosa
 import numpy as np
 import pandas as pd
 
-# Project paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 METADATA_PATH = PROJECT_ROOT / "data" / "processed" / "metadata.csv"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "features.csv"
 
-# Feature extraction settings
 SAMPLE_RATE = 22050
 N_MFCC = 40
 
 
-def extract_mfcc(audio_path):
-    """Extract 40 MFCCs and summarize each using mean and std."""
-
+def extract_features(audio_path):
     signal, sr = librosa.load(
         audio_path,
         sr=SAMPLE_RATE,
@@ -32,40 +28,83 @@ def extract_mfcc(audio_path):
         hop_length=512
     )
 
-    # Summarize each coefficient across audio frames.
-    mfcc_mean = np.mean(mfcc, axis=1)
-    mfcc_std = np.std(mfcc, axis=1)
+    rms = librosa.feature.rms(
+        y=signal,
+        frame_length=2048,
+        hop_length=512
+    )
 
-    # 40 means + 40 standard deviations = 80 features.
-    return np.concatenate([mfcc_mean, mfcc_std])
+    zcr = librosa.feature.zero_crossing_rate(
+        y=signal,
+        frame_length=2048,
+        hop_length=512
+    )
+
+    f0, voiced_flag, voiced_prob = librosa.pyin(
+        signal,
+        fmin=librosa.note_to_hz("C2"),
+        fmax=librosa.note_to_hz("C7"),
+        sr=sr,
+        frame_length=2048,
+        hop_length=512
+    )
+
+    valid_pitch = f0[~np.isnan(f0)]
+
+    if len(valid_pitch) > 0:
+        pitch_features = [
+            np.mean(valid_pitch),
+            np.std(valid_pitch),
+            np.min(valid_pitch),
+            np.max(valid_pitch)
+        ]
+    else:
+        pitch_features = [0, 0, 0, 0]
+
+    features = np.concatenate([
+        np.mean(mfcc, axis=1),
+        np.std(mfcc, axis=1),
+        [np.mean(rms), np.std(rms)],
+        [np.mean(zcr), np.std(zcr)],
+        pitch_features
+    ])
+
+    return features
 
 
 def main():
     if not METADATA_PATH.exists():
-        raise FileNotFoundError(
-            f"Metadata not found: {METADATA_PATH}\n"
-            "Run python src/prepare_dataset.py first."
-        )
+        raise FileNotFoundError(f"Metadata not found: {METADATA_PATH}")
 
     df = pd.read_csv(METADATA_PATH)
     records = []
     errors = []
 
-    print(f"Total recordings to process: {len(df)}")
-    print("Extracting MFCC features. Please wait...\n")
+    print(f"Total recordings: {len(df)}")
+    print("Extracting MFCC, RMS, ZCR and pitch features...\n")
 
     for index, row in df.iterrows():
         try:
-            features = extract_mfcc(row["file_path"])
+            features = extract_features(row["file_path"])
 
             record = {
                 "filename": row["filename"],
                 "actor_id": int(row["actor_id"]),
-                "emotion": row["emotion"],
+                "emotion": row["emotion"]
             }
 
-            for i, value in enumerate(features):
+            for i, value in enumerate(features[:80]):
                 record[f"mfcc_{i + 1:02d}"] = float(value)
+
+            record["rms_mean"] = float(features[80])
+            record["rms_std"] = float(features[81])
+            record["zcr_mean"] = float(features[82])
+            record["zcr_std"] = float(features[83])
+
+            record["pitch_mean"] = float(features[84])
+            record["pitch_std"] = float(features[85])
+            record["pitch_min"] = float(features[86])
+            record["pitch_max"] = float(features[87])
 
             records.append(record)
 
@@ -75,24 +114,22 @@ def main():
 
         completed = index + 1
         if completed % 100 == 0 or completed == len(df):
-            print(f"Processed {completed}/{len(df)} recordings")
+            print(f"Processed {completed}/{len(df)}")
 
     if not records:
-        raise RuntimeError("No audio features were extracted.")
+        raise RuntimeError("No features were extracted.")
 
     features_df = pd.DataFrame(records)
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     features_df.to_csv(OUTPUT_PATH, index=False)
 
     print("\nFeature extraction complete!")
-    print(f"Successful recordings: {len(records)}")
-    print(f"Failed recordings: {len(errors)}")
-    print(f"Feature columns: {features_df.shape[1]}")
-    print(f"Saved to: {OUTPUT_PATH}")
-
-    if errors:
-        print("\nCheck the messages above for failed recordings.")
+    print("Successful recordings:", len(records))
+    print("Failed recordings:", len(errors))
+    print("Dataset shape:", features_df.shape)
+    print("Saved to:", OUTPUT_PATH)
 
 
 if __name__ == "__main__":
     main()
+
